@@ -736,9 +736,9 @@ NormalizeZip(zip) {
     if (text = "")
         return ""
 
-    ; Accept only standalone ZIP or ZIP+4 style text
-    if RegExMatch(text, "^\d{5}(?:-\d{4})?$", &m)
-        return SubStr(m[0], 1, 5)
+    ; Extract first valid 5-digit ZIP even if extra text exists, e.g. "33182 Country"
+    if RegExMatch(text, "\b(\d{5})(?:-\d{4})?\b", &m)
+        return m[1]
 
     return ""
 }
@@ -809,15 +809,19 @@ NormalizeDOB(dob) {
     work := RegExReplace(work, "\s+", " ")
     work := Trim(work)
 
-    ; remove parentheses and commas
+    ; remove parentheses and normalize punctuation
     work := RegExReplace(work, "[\(\)]", " ")
     work := RegExReplace(work, ",", " ")
     work := RegExReplace(work, "\s+", " ")
     work := Trim(work)
 
     ; remove leading age patterns
-    work := RegExReplace(work, "i)^\s*age\s*\d{1,3}\s*", "")
-    work := RegExReplace(work, "i)^\s*\d{1,3}\s*(?:años|anos)\s*", "")
+    ; examples:
+    ; "58 años, nacida en marzo de 1967"
+    ; "Age 49, March 1977"
+    ; "59, April 26 1966"
+    work := RegExReplace(work, "i)^\s*age\s*\d{1,3}\s*,?\s*", "")
+    work := RegExReplace(work, "i)^\s*\d{1,3}\s*(?:años|anos)\s*,?\s*", "")
     work := RegExReplace(work, "i)^\s*\d{1,3}\s*,\s*", "")
 
     ; remove filler phrases
@@ -825,8 +829,7 @@ NormalizeDOB(dob) {
     work := RegExReplace(work, "i)\bnacido\s+en\b", " ")
     work := RegExReplace(work, "i)\bconfirm\b", " ")
 
-    ; HARD CUT: remove slash + trailing age text completely
-    ; examples:
+    ; remove slash + trailing age text
     ; "mayo de 1965/ 60 AÑOS"
     ; "3 junio de 1979 / 46 AÑOS"
     work := RegExReplace(work, "i)\s*/\s*\d{1,3}.*$", "")
@@ -834,7 +837,7 @@ NormalizeDOB(dob) {
     ; remove trailing age if no slash
     work := RegExReplace(work, "i)\s+\d{1,3}\s*(?:años|anos)$", "")
 
-    ; normalize Spanish months + remove "de"
+    ; normalize Spanish months and remove "de"
     work := NormalizeMonthWords(work)
 
     work := RegExReplace(work, "\s+", " ")
@@ -1555,8 +1558,22 @@ FillNewProspectForm(fields) {
 }
 ^!m:: {
     raw := Trim(A_Clipboard)
-    result := NormalizeDOB(raw)
-    MsgBox("RAW:`n" raw "`n`nDOB:`n" result)
+    if (raw = "") {
+        MsgBox("Clipboard empty.")
+        return
+    }
+
+    data := ParseLabeledLeadRaw(raw)
+    dobRaw := data.Has("Date of Birth") ? data["Date of Birth"] : ""
+    zipRaw := data.Has("Zip Code") ? data["Zip Code"] : ""
+
+    MsgBox(
+        "DOB RAW:`n" dobRaw
+        . "`n`nDOB NORMALIZED:`n" NormalizeDOB(dobRaw)
+        . "`n`nZIP RAW:`n" zipRaw
+        . "`n`nZIP NORMALIZED:`n" NormalizeZip(zipRaw),
+        "DOB / ZIP Debug"
+    )
 }
 ^!p:: {
     raw := Trim(A_Clipboard)
