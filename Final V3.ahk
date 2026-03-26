@@ -680,6 +680,18 @@ PasteValue(text) {
     return true
 }
 
+PasteValueRaw(text) {
+    text := text ?? ""
+    if (text = "")
+        return false
+    if !SetClip(text)
+        return false
+    Sleep 60
+    Send "^v"
+    Sleep 90
+    return true
+}
+
 SendTabs(count) {
     Loop count {
         Send "{Tab}"
@@ -1939,13 +1951,51 @@ EnterEditableQuoTagField() {
     if !ActivateQuoTagTarget()
         return false
 
+    ; give page time to regain focus after DevTools closes
+    Sleep 400
+
+    Send "{Tab}"
     Sleep 220
+	
+	Send "{Tab}"
+    Sleep 220
+
     Send "{Tab}"
-    Sleep 150
-    Send "{Tab}"
-    Sleep 150
+    Sleep 220
+
     Send "{Enter}"
-    Sleep 180
+    Sleep 300
+
+    return true
+}
+
+ApplyQuoTag(tagText) {
+    global BATCH_BEFORE_TAG_PASTE, BATCH_AFTER_TAG_PASTE, BATCH_AFTER_ENTER
+
+    if !EnterEditableQuoTagField()
+        return false
+
+    ; delete exactly once
+    Sleep 120
+    Send "{Backspace}"
+    Sleep 120
+
+    ; paste without extra backspace
+    Sleep BATCH_BEFORE_TAG_PASTE
+    if !PasteValueRaw(tagText)
+        return false
+    Sleep BATCH_AFTER_TAG_PASTE
+
+    ; confirm tag
+    Send "{Enter}"
+    Sleep BATCH_AFTER_ENTER
+    Send "{Enter}"
+    Sleep BATCH_AFTER_ENTER
+
+    ; reset for next lead
+    SendTabs(2)
+    Sleep 200
+
     return true
 }
 
@@ -2398,30 +2448,10 @@ RunBatchLeadFlow(lead) {
     Send "{Enter}"
     Sleep BATCH_AFTER_ENTER
 
-    ; NEW TAG LOGIC: use same Quo tag activation path as ^!u
-    Sleep 300
-    if !EnterEditableQuoTagField()
-        return "FAILED - Could not enter editable tag field"
-
-    ; delete existing tag/chip once
-    Sleep 120
-    Send "{Backspace}"
-    Sleep 120
-
-    ; paste tag value into editable tag field
-    Sleep BATCH_BEFORE_TAG_PASTE
-    if !PasteValue(lead["HOLDER_NAME"])
-        return "FAILED - Could not paste tag value"
-    Sleep BATCH_AFTER_TAG_PASTE
-
-    ; confirm tag and exit back to restart state
-    Send "{Enter}"
-    Sleep BATCH_AFTER_ENTER
-    Send "{Enter}"
-    Sleep BATCH_AFTER_ENTER
-
-    SendTabs(2)
-    Sleep 200
+        Sleep 300
+		
+    if !ApplyQuoTag(lead["TAG_VALUE"])
+        return "FAILED - Could not apply tag"
 
     return "OK"
 }
@@ -2443,7 +2473,6 @@ StripGridActionText(text) {
 RunQuickLeadCreateAndTag(lead) {
     global BATCH_AFTER_ALTN, BATCH_AFTER_PHONE
     global BATCH_AFTER_ENTER, BATCH_AFTER_NAME_PICK
-    global BATCH_BEFORE_TAG_PASTE, BATCH_AFTER_TAG_PASTE
 
     if !FocusWorkBrowser()
         return "FAILED - Browser lost focus"
@@ -2453,28 +2482,23 @@ RunQuickLeadCreateAndTag(lead) {
     if (lead["PHONE"] = "" || lead["FULL_NAME"] = "")
         return "FAILED - Missing phone or name"
 
-    ; create/open new lead
     Send "!n"
     Sleep BATCH_AFTER_ALTN
 
-    ; paste phone
     if !PasteValue(lead["PHONE"])
         return "FAILED - Could not paste phone"
     Sleep BATCH_AFTER_PHONE
 
-    ; move into text/composer area, but do NOT schedule anything
     Send "{Tab}"
     Sleep 1000
     FocusSlateComposer()
     Sleep 250
 
-    ; go to the name search / picker area
     SendTabs(8)
     Sleep 200
     Send "{Enter}"
     Sleep BATCH_AFTER_ENTER
 
-    ; paste holder name into the name field
     Send "^a"
     Sleep 80
     if !PasteValue(lead["HOLDER_NAME"])
@@ -2484,33 +2508,8 @@ RunQuickLeadCreateAndTag(lead) {
     Send "{Enter}"
     Sleep BATCH_AFTER_ENTER
 
-    ; activate the editable tag field with the same logic used for Quo tags
-    if !ActivateQuoTagTarget()
-        return "FAILED - Could not activate tag target"
-
-    Sleep 220
-    Send "{Tab}"
-    Sleep 150
-	Send "{Tab}"
-    Sleep 150
-    Send "{Enter}"
-    Sleep 180
-
-    ; remove old/default tag once
-    Send "{Backspace}"
-    Sleep 120
-
-    ; paste tag
-    Sleep BATCH_BEFORE_TAG_PASTE
-    if !PasteValue(lead["TAG_VALUE"])
-        return "FAILED - Could not paste tag value"
-    Sleep BATCH_AFTER_TAG_PASTE
-
-    ; confirm out
-    Send "{Enter}"
-    Sleep BATCH_AFTER_ENTER
-    Send "{Enter}"
-    Sleep BATCH_AFTER_ENTER
+    if !ApplyQuoTag(lead["TAG_VALUE"])
+        return "FAILED - Could not apply tag"
 
     return "OK"
 }
