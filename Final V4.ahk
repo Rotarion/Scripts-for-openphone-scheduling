@@ -34,9 +34,9 @@ batchLogFile := A_ScriptDir "\batch_lead_log.csv"
 
 ; Typing-mode pacing for ^!7 (stable)
 SLOW_ACTIVATE_DELAY := 250
-SLOW_AFTER_MSG      := 350
-SLOW_AFTER_SCHED    := 450
-SLOW_AFTER_DT_PASTE := 450
+SLOW_AFTER_MSG      := 900
+SLOW_AFTER_SCHED    := 900
+SLOW_AFTER_DT_PASTE := 900
 SLOW_AFTER_ENTER    := 300
 
 ; Batch holder + pacing
@@ -46,7 +46,7 @@ BATCH_AFTER_ALTN        := 5000
 BATCH_AFTER_PHONE       := 200
 BATCH_AFTER_TAB         := 150
 BATCH_AFTER_SCHEDULE    := 600
-BATCH_AFTER_ENTER       := 150
+BATCH_AFTER_ENTER       := 250
 BATCH_AFTER_NAME_PICK   := 250
 BATCH_AFTER_TAG_PICK    := 250
 BATCH_BEFORE_TAG_PASTE  := 500
@@ -671,7 +671,11 @@ Esc::ExitApp
     SendEvent "{Tab}"
     Sleep 150
     SendEvent "q"
-    Sleep 2050
+    Sleep 150
+    SendEvent "+{Tab}"
+    Sleep 3050
+    SendEvent "{Tab}"
+    Sleep 250
     SendEvent "{Tab}"
     Sleep 250
     SendEvent "3"
@@ -1222,10 +1226,38 @@ NormalizeProspectInput(raw) {
     if IsLabeledLeadFormat(raw)
         return ParseLabeledLeadToProspect(raw)
 
+    if IsLikelyBatchGridInput(raw)
+        return ParseBatchGridRow(ExtractFirstBatchGridRow(raw))
+
     if RegExMatch(raw, "i)PERSONAL\s+LEAD")
         return ParseBatchCRMToProspect(raw)
 
     return NormalizeRawLeadToProspect(raw)
+}
+
+IsLikelyBatchGridInput(raw) {
+    firstRow := ExtractFirstBatchGridRow(raw)
+    if (firstRow = "")
+        return false
+
+    cols := StrSplit(firstRow, "`t")
+    return cols.Length >= 11
+        && RegExMatch(Trim(cols[1]), "i)PERSONAL\s+LEAD")
+        && RegExMatch(Trim(cols[4]), "^\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}:\d{2}\s*(AM|PM)$")
+        && RegExMatch(Trim(cols[8]), "^\d{5}$")
+        && RegExMatch(Trim(cols[9]), "^\(\d{3}\)\s*\d{3}-\d{4}$")
+}
+
+ExtractFirstBatchGridRow(raw) {
+    clean := StrReplace(raw, "`r", "")
+    for _, line in StrSplit(clean, "`n") {
+        line := Trim(line)
+        if (line = "")
+            continue
+        if InStr(line, "`t") && RegExMatch(line, "i)PERSONAL\s+LEAD")
+            return line
+    }
+    return ""
 }
 
 ParseBatchCRMToProspect(raw) {
@@ -1877,35 +1909,38 @@ NormalizeDOB(dob) {
     if (text = "")
         return ""
 
+    ; 1) Prefer a date found inside parentheses
+    if RegExMatch(text, "\(([^()]*)\)", &mp) {
+        inner := NormalizeDOB(mp[1])
+        if (inner != "")
+            return inner
+    }
+
     work := StrLower(text)
-    work := RegExReplace(work, "\s+", " ")
-    work := Trim(work)
+    work := NormalizeMonthWords(work)
 
-    work := RegExReplace(work, "[\(\)]", " ")
-    work := RegExReplace(work, "\s+", " ")
-    work := Trim(work)
-
-    ; Age stripping BEFORE comma removal (so "40," still has its comma)
-    work := RegExReplace(work, "i)^\s*age\s*\d{1,3}\s*,?\s*", "")
-    work := RegExReplace(work, "i)^\s*\d{1,3}\s*(?:años|anos)\s*,?\s*", "")
-    work := RegExReplace(work, "i)^\s*\d{1,3}\s*,\s*", "")
-
-    ; NOW strip commas for date parsing
-    work := RegExReplace(work, ",", " ")
-    work := RegExReplace(work, "\s+", " ")
-    work := Trim(work)
-
+    work := RegExReplace(work, "i)\bborn\s+in\b", " ")
+    work := RegExReplace(work, "i)\bborn\b", " ")
     work := RegExReplace(work, "i)\bnacid[oa]\s+en\b", " ")
     work := RegExReplace(work, "i)\bnaci[oó]\s+en\b", " ")
-    work := RegExReplace(work, "i)\bconfirm\b", " ")
-    work := RegExReplace(work, "i)\bborn\b", " ")
 
-    work := RegExReplace(work, "i)\s+\d{1,3}\s*(?:años|anos)$", "")
+    ; remove age wrappers, but do not destroy day-first dates like 20-nov-78
+    work := RegExReplace(work, "i)^\s*age\s*:?\s*\d{1,3}\s*,?\s*", "")
+    work := RegExReplace(work, "i)^\s*\d{1,3}\s*,\s*", "")
+    work := RegExReplace(work, "i)^\s*\d{1,3}\s*(?:años|anos)\s*,?\s*", "")
+    work := RegExReplace(work, "i)\s*/\s*\d{1,3}\s*(?:años|anos)\s*$", "")
+    work := RegExReplace(work, "i)\s+\d{1,3}\s*(?:años|anos)\s*$", "")
 
-    work := NormalizeMonthWords(work)
-    work := RegExReplace(work, "[\.,;:]+", " ")
-    work := RegExReplace(work, "[\s\./,;:]+$", "")
+    work := RegExReplace(work, "[\(\)]", " ")
+    work := RegExReplace(work, "[,;:]+", " ")
+    work := RegExReplace(work, "\s+", " ")
     work := Trim(work)
+
+    if RegExMatch(work, "i)^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)[-\s](\d{2,4})$", &m) {
+        month := MonthNumber(m[1])
+        if month
+            return FormatDateString(month, dobDefaultDay, NormalizeYear(m[2]))
+    }
 
     if RegExMatch(work, "i)^(\d{1,2})[-\s](jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[-\s](\d{2,4})$", &m) {
         month := MonthNumber(m[2])
@@ -2417,26 +2452,27 @@ BuildFollowupQueue(leadName, offset) {
 ; ===================== BATCH LEAD WORKFLOWS =====================
 
 ParseBatchGridRow(raw) {
+    fields := NewProspectFields()
     cols := StrSplit(raw, "`t")
 
-    ; map by known grid order
-    ; Name | Folder | Status | Assigned On | Address 1 | City | State/Province | Zip Code | Phone | Custom 5 | Custom 7 | Custom 8 | Custom 9 | Custom 10
-fields := Map()
-fields["RAW_NAME"]  := cols[1]
-fields["ADDRESS_1"] := Trim(cols[5])
-fields["CITY"]      := NormalizeCity(cols[6])
-fields["STATE"]     := NormalizeState(cols[7])
-fields["ZIP"]       := NormalizeZip(cols[8])
-fields["PHONE"]     := NormalizePhone(cols[9])
-fields["DOB"]       := NormalizeDOB(cols[10])
-fields["GENDER"]    := NormalizeGender(cols[11])
+    if (cols.Length < 11)
+        return fields
 
-nameText := ExtractBatchName(cols[1])
-if (nameText != "")
-    ApplyLeadName(fields, nameText)
+    fields["RAW_NAME"]  := Trim(cols[1])
+    fields["ADDRESS_1"] := Trim(cols[5])
+    fields["CITY"]      := NormalizeCity(cols[6])
+    fields["STATE"]     := NormalizeState(cols[7])
+    fields["ZIP"]       := NormalizeZip(cols[8])
+    fields["PHONE"]     := NormalizePhone(cols[9])
+    fields["DOB"]       := NormalizeDOB(cols[10])
+    fields["GENDER"]    := NormalizeGender(cols[11])
 
-NormalizeAddressMap(fields)
-return fields
+    nameText := ExtractBatchName(cols[1])
+    if (nameText != "")
+        ApplyLeadName(fields, nameText)
+
+    NormalizeAddressMap(fields)
+    return fields
 }
 
 ParseBatchLeadRows(raw) {
