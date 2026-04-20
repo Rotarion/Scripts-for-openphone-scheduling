@@ -1,4 +1,4 @@
-(() => {
+copy(String((() => {
   function visible(el) {
     if (!el) return false;
     const r = el.getBoundingClientRect();
@@ -103,4 +103,4 @@
   }
 
   return 'NO_TARGET';
-})()
+})()));
