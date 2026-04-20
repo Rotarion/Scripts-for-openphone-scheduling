@@ -1,4 +1,5 @@
-﻿; Automated copy fixed V2.0.ahk — Allstate / Pablo Cabrera
+#Requires AutoHotkey v2.0
+
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 SendMode "Input"
@@ -14,7 +15,9 @@ EnsureIniDefaults()
 ; Agent persisted in the same INI
 agentName  := IniRead(iniFile, "Agent", "Name", "Pablo Cabrera")
 agentEmail := IniRead(iniFile, "Agent", "Email", "pablocabrera@allstate.com")
-tagSymbol  := IniRead(iniFile, "Agent", "TagSymbol", "+")
+tagSymbol  := Trim(IniRead(iniFile, "Agent", "TagSymbol", "+"))
+if (tagSymbol = "")
+    tagSymbol := "+"
 
 ; Schedule days (read from INI)
 daysStr := IniRead(iniFile, "Schedule", "Days", "1,2,4,5")
@@ -24,28 +27,89 @@ if (configDays.Length != 4) {
     IniWrite("1,2,4,5", iniFile, "Schedule", "Days")
 }
 
+batchMinVehicles := Integer(IniRead(iniFile, "Batch", "MinVehicles", "0"))
+batchMaxVehicles := Integer(IniRead(iniFile, "Batch", "MaxVehicles", "99"))
+dobDefaultDay    := Integer(IniRead(iniFile, "DOB", "DefaultDay", "16"))
+batchTabsChatToName := Integer(IniRead(iniFile, "UI", "BatchTabsChatToName", "7"))
+priceOldCar := Integer(IniRead(iniFile, "Pricing", "OldCar", "98"))
+priceOneCar := Integer(IniRead(iniFile, "Pricing", "OneCar", "117"))
+priceOneCar2020Plus := Integer(IniRead(iniFile, "Pricing", "OneCar2020Plus", "167"))
+priceTwoCars := Integer(IniRead(iniFile, "Pricing", "TwoCars", "176"))
+priceThreeCars := Integer(IniRead(iniFile, "Pricing", "ThreeCars", "284"))
+priceFourCars := Integer(IniRead(iniFile, "Pricing", "FourCars", "397"))
+priceFiveCars := Integer(IniRead(iniFile, "Pricing", "FiveCars", "397"))
+singleCarModernYearCutoff := Integer(IniRead(iniFile, "Pricing", "SingleCarModernYearCutoff", "2020"))
+
+; Log file creator
+batchLogFile := A_ScriptDir "\batch_lead_log.csv"
+tagActivationJsFile := A_ScriptDir "\tag_activation.js"
+participantInputJsFile := A_ScriptDir "\participant_input_focus.js"
+
 ; Typing-mode pacing for ^!7 (stable)
-SLOW_ACTIVATE_DELAY := 500
-SLOW_AFTER_MSG      := 900
-SLOW_AFTER_SCHED    := 900
-SLOW_AFTER_DT_PASTE := 900
+SLOW_ACTIVATE_DELAY := 250
+SLOW_AFTER_MSG      := 550
+SLOW_AFTER_SCHED    := 650
+SLOW_AFTER_DT_PASTE := 650
 SLOW_AFTER_ENTER    := 300
 
 ; Batch holder + pacing
 batchLeadHolder := []
 
+BATCH_AFTER_ALTN        := 5000
+BATCH_AFTER_PHONE       := 650
+BATCH_AFTER_TAB         := 150
+BATCH_AFTER_SCHEDULE    := 600
+BATCH_AFTER_ENTER       := 150
+BATCH_AFTER_NAME_PICK   := 250
+BATCH_AFTER_TAG_PICK    := 250
+BATCH_BEFORE_TAG_PASTE  := 500
+BATCH_AFTER_TAG_PASTE   := 700
+
 ; ===================== GLOBAL STATE =====================
 
 running := false
+batchResumeIndex := 1
+batchResumeMode := ""
+batchResumeRaw := ""
 
 ; ===================== HOTKEY ENTRY POINTS =====================
 
 Esc::ExitApp
 
+^!g:: {
+    global tagSymbol
+
+    result := RunQuoTagSelector()
+    if (result = "") {
+        MsgBox("Selector JS returned blank result.")
+        return
+    }
+
+    finalStatus := HandleQuoTagSelectorResult(result, tagSymbol)
+
+    MsgBox(
+        "Selector result: " result "`n"
+        . "Final status: " finalStatus "`n"
+        . "Tag used: " tagSymbol,
+        "Quo Tag Selector Test"
+    )
+}
+
 ^!r:: {
     global iniFile
     IniWrite(0, iniFile, "Times", "Offset")
     MsgBox("Rotation index reset to 0.")
+}
+
+^!c:: {
+    hwnd := WinGetID("A")  ; "A" = active window
+    controls := WinGetControls("ahk_id " hwnd)
+
+    out := ""
+    for c in controls
+        out .= c "`n"
+
+    MsgBox out = "" ? "No controls found." : out
 }
 
 ^!`:: {
@@ -89,51 +153,34 @@ Esc::ExitApp
     TrayTip("AHK", "Agente actualizado a:`n" newName "`n" newEmail "`nSímbolo: " newTagSymbol, 1)
 }
 
-^!0:: {
+^!u:: {
     if !ClipWait(1) {
-        MsgBox("Clipboard empty. Copy the lead's name first.")
-        return
-    }
-    lead := CleanName(A_Clipboard)
-    if (lead = "" || StrLen(lead) > 30) {
-        MsgBox("Please copy just the lead's name (<= 30 chars) and try again.")
+        MsgBox("Clipboard empty. Copy one lead row first.")
         return
     }
 
-    msgs := BuildPaymentQueue(lead)
-
-    for m in msgs {
-        ok := ScheduleMessageTyped(m["text"], m["date"], m["time"])
-        if !ok {
-            MsgBox("Failed scheduling payment message. Stopping.")
-            return
-        }
-    }
-}
-
-^!-:: {
-    if !ClipWait(1) {
-        MsgBox("Clipboard empty. Copy the lead's name first.")
-        return
-    }
-    lead := CleanName(A_Clipboard)
-    if (lead = "" || StrLen(lead) > 30) {
-        MsgBox("Please copy just the lead's name (<= 30 chars) and try again.")
+    raw := Trim(A_Clipboard)
+    if (raw = "") {
+        MsgBox("Clipboard empty. Copy one lead row first.")
         return
     }
 
-    msgs := BuildPaymentQueueEnglish(lead)
+    lead := BuildBatchLeadRecord(raw)
 
-    for m in msgs {
-        ok := ScheduleMessageTyped(m["text"], m["date"], m["time"])
-        if !ok {
-            MsgBox("Failed scheduling payment message. Stopping.")
-            return
-        }
+    if (lead["PHONE"] = "" || lead["FULL_NAME"] = "") {
+        MsgBox("Could not parse phone/name from clipboard.")
+        return
     }
+
+    result := RunQuickLeadCreateAndTag(lead)
+
+    if (result != "OK")
+        MsgBox(result)
 }
 
 ^!1:: {
+    global priceOldCar, priceOneCar, priceTwoCars, priceThreeCars, priceFourCars, priceFiveCars
+
     if !ClipWait(1) {
         MsgBox("Clipboard empty. Copy the lead's name first.")
         return
@@ -144,17 +191,16 @@ Esc::ExitApp
         return
     }
 
-    ib := InputBox(
+    promptText :=
         "Escribe 0, 1, 2, 3, 4 o 5:`n"
-        . "0 = auto muy antiguo ($98, sin 'FULL COVERAGE')`n"
-        . "1 = su carro ($117, FULL COVERAGE)`n"
-        . "2 = sus carros ($176, FULL COVERAGE)`n"
-        . "3 = sus carros ($284, FULL COVERAGE)`n"
-        . "4 = sus carros ($397, FULL COVERAGE)`n"
-        . "5 = sus carros ($397, FULL COVERAGE, 100/300)",
-        "Número de vehículos",
-        "w420 h280"
-    )
+        . "0 = auto muy antiguo (" FormatMonthlyPrice(priceOldCar) ", sin 'FULL COVERAGE')`n"
+        . "1 = su carro (" FormatMonthlyPrice(priceOneCar) ", FULL COVERAGE)`n"
+        . "2 = sus carros (" FormatMonthlyPrice(priceTwoCars) ", FULL COVERAGE)`n"
+        . "3 = sus carros (" FormatMonthlyPrice(priceThreeCars) ", FULL COVERAGE)`n"
+        . "4 = sus carros (" FormatMonthlyPrice(priceFourCars) ", FULL COVERAGE)`n"
+        . "5 = sus carros (" FormatMonthlyPrice(priceFiveCars) ", FULL COVERAGE, 100/300)"
+
+    ib := InputBox(promptText, "Número de vehículos", "w420 h280")
     if (ib.Result != "OK")
         return
 
@@ -284,8 +330,6 @@ Esc::ExitApp
         MsgBox("configDays has " configDays.Length " items. Check [Schedule] Days= in the INI.", "Follow-up Preview")
         return
     }
-
-    ; --- Section 1: Business day follow-up preview ---
     Show := (n) => BusinessDateForDay(n, holidays)
     msg := "Config days: " configDays[1] ", " configDays[2] ", " configDays[3] ", " configDays[4] "`n`n"
     msg .= "Resolved dates (business days from today):`n"
@@ -293,16 +337,37 @@ Esc::ExitApp
     msg .= "B: day " configDays[2] " -> " Show(configDays[2]) "`n"
     msg .= "C: day " configDays[3] " -> " Show(configDays[3]) "`n"
     msg .= "D: day " configDays[4] " -> " Show(configDays[4])
-
-    ; --- Section 2: Customer Service Mondays ---
-    mondays := BuildNextThreeMondays(holidays)
-    msg .= "`n`nCustomer Service Mondays:`n"
-    msg .= "  Lunes 1: " mondays[1] "`n"
-    msg .= "  Lunes 2: " mondays[2] "`n"
-    msg .= "  Lunes 3: " mondays[3]
-
     MsgBox(msg, "Follow-up Preview")
 }
+^!0:: {
+    raw := Trim(A_Clipboard)
+    if (raw = "") {
+        MsgBox("Clipboard empty. Copy the raw lead first.")
+        return
+    }
+
+    fields := NormalizeProspectInput(raw)
+
+    if !FocusWorkBrowser() {
+        MsgBox("Browser not found. Open National General first.")
+        return
+    }
+
+   ; ToolTip("Click FIRST NAME now")
+   ; KeyWait "LButton", "D"
+   ; Sleep 120
+   ; KeyWait "LButton"
+   ; ToolTip()
+
+
+    ToolTip("Click FIRST NAME now (2s)")
+    Sleep 500
+    ToolTip()
+
+
+    FillNationalGeneralForm(fields)
+}
+
 
 ^!9:: {
     raw := Trim(A_Clipboard)
@@ -319,7 +384,7 @@ Esc::ExitApp
     }
 
     ToolTip("Click FIRST NAME now (2s)")
-    Sleep 2000
+    Sleep 500
     ToolTip()
 
     FillNewProspectForm(fields)
@@ -379,12 +444,427 @@ Esc::ExitApp
 
     msg := "Leads found: " batchLeadHolder.Length "`n`n"
     for i, lead in batchLeadHolder {
+        previewPrice := ResolveQuotePrice(lead["VEHICLE_COUNT"], lead["VEHICLES"], true)
         msg .= i ". " lead["FULL_NAME"]
             . " | Phone: " lead["PHONE"]
             . " | Cars: " lead["VEHICLE_COUNT"]
+            . " | Price: " previewPrice
             . "`n"
     }
     MsgBox(msg, "Batch Lead Holder Preview")
+}
+
+^!b:: {
+    global batchLeadHolder, batchLogFile
+    global batchResumeIndex, batchResumeMode, batchResumeRaw
+
+    raw := Trim(A_Clipboard)
+    if (raw = "") {
+        MsgBox("Clipboard empty. Copy the batch first.")
+        return
+    }
+
+    batchLeadHolder := BuildBatchLeadHolder(raw)
+
+    if (batchLeadHolder.Length = 0) {
+        MsgBox("No lead rows detected in clipboard.")
+        return
+    }
+
+    if !FocusWorkBrowser() {
+        MsgBox("Browser not detected. Open the CRM page first.")
+        return
+    }
+
+    Sleep 300
+
+    log := []
+    okCount := 0
+    failCount := 0
+    pausedAt := 0
+
+    try {
+        EnsureBatchLogHeader()
+    } catch Error as err {
+        MsgBox("Cannot write to batch log file:`n" batchLogFile "`n`nClose Excel or any app using it, then try again.`n`nDetails: " err.Message)
+        return
+    }
+
+    startIndex := 1
+    if (batchResumeMode = "B" && batchResumeRaw = raw && batchResumeIndex >= 1 && batchResumeIndex <= batchLeadHolder.Length)
+        startIndex := batchResumeIndex
+    else {
+        batchResumeIndex := 1
+        batchResumeMode := ""
+        batchResumeRaw := ""
+    }
+
+    Loop batchLeadHolder.Length - startIndex + 1 {
+        i := startIndex + A_Index - 1
+        lead := batchLeadHolder[i]
+        status := RunBatchLeadFlow(lead)
+
+        try {
+            AppendBatchLog(lead, status)
+        } catch Error as err {
+            MsgBox("Batch ran, but logging failed for:`n" lead["FULL_NAME"] "`n`nClose the CSV if it's open.`n`nDetails: " err.Message)
+            return
+        }
+
+        log.Push(i . ". " . lead["FULL_NAME"] . " -> " . status)
+
+        if (status = "OK")
+            okCount += 1
+        else
+            failCount += 1
+
+        if (SubStr(status, 1, 8) = "PAUSED -") {
+            pausedAt := i
+            if (i < batchLeadHolder.Length) {
+                batchResumeIndex := i + 1
+                batchResumeMode := "B"
+                batchResumeRaw := raw
+            } else {
+                batchResumeIndex := 1
+                batchResumeMode := ""
+                batchResumeRaw := ""
+            }
+            break
+        }
+    }
+
+    msg := pausedAt
+        ? "Batch paused at lead " pausedAt ".`nRe-run Ctrl+Alt+B to continue with the next lead.`n`n"
+        : "Batch complete.`n`n"
+
+    msg .= "Success: " okCount "`n"
+        . "Failed/Skipped: " failCount "`n`n"
+
+    for _, line in log
+        msg .= line "`n"
+
+    MsgBox(msg, pausedAt ? "Batch Run Log (Paused)" : "Batch Run Log")
+}
+
+^!n:: {
+    global batchLeadHolder, batchLogFile
+    global batchResumeIndex, batchResumeMode, batchResumeRaw
+
+    raw := Trim(A_Clipboard)
+    if (raw = "") {
+        MsgBox("Clipboard empty. Copy the batch first.")
+        return
+    }
+
+    batchLeadHolder := BuildBatchLeadHolder(raw)
+
+    if (batchLeadHolder.Length = 0) {
+        MsgBox("No lead rows detected in clipboard.")
+        return
+    }
+
+    if !FocusWorkBrowser() {
+        MsgBox("Browser not detected. Open the CRM page first.")
+        return
+    }
+
+    Sleep 300
+
+    log := []
+    okCount := 0
+    failCount := 0
+    pausedAt := 0
+
+    try {
+        EnsureBatchLogHeader()
+    } catch Error as err {
+        MsgBox("Cannot write to batch log file:`n" batchLogFile "`n`nClose Excel or any app using it, then try again.`n`nDetails: " err.Message)
+        return
+    }
+
+    startIndex := 1
+    if (batchResumeMode = "N" && batchResumeRaw = raw && batchResumeIndex >= 1 && batchResumeIndex <= batchLeadHolder.Length)
+        startIndex := batchResumeIndex
+    else {
+        batchResumeIndex := 1
+        batchResumeMode := ""
+        batchResumeRaw := ""
+    }
+
+    Loop batchLeadHolder.Length - startIndex + 1 {
+        i := startIndex + A_Index - 1
+        lead := batchLeadHolder[i]
+        status := RunBatchLeadFlowFast(lead)
+
+        try {
+            AppendBatchLog(lead, status)
+        } catch Error as err {
+            MsgBox("Batch ran, but logging failed for:`n" lead["FULL_NAME"] "`n`nClose the CSV if it's open.`n`nDetails: " err.Message)
+            return
+        }
+
+        log.Push(i . ". " . lead["FULL_NAME"] . " -> " . status)
+
+        if (status = "OK")
+            okCount += 1
+        else
+            failCount += 1
+
+        if (SubStr(status, 1, 8) = "PAUSED -") {
+            pausedAt := i
+            if (i < batchLeadHolder.Length) {
+                batchResumeIndex := i + 1
+                batchResumeMode := "N"
+                batchResumeRaw := raw
+            } else {
+                batchResumeIndex := 1
+                batchResumeMode := ""
+                batchResumeRaw := ""
+            }
+            break
+        }
+    }
+
+    msg := pausedAt
+        ? "Batch paused at lead " pausedAt ".`nRe-run Ctrl+Alt+N to continue with the next lead.`n`n"
+        : "Batch complete (FAST).`n`n"
+
+    msg .= "Success: " okCount "`n"
+        . "Failed/Skipped: " failCount "`n`n"
+
+    for _, line in log
+        msg .= line "`n"
+
+    MsgBox(msg, pausedAt ? "Batch Run Log (Fast Paused)" : "Batch Run Log (Fast)")
+}
+
+^!t:: {
+    global configDays, holidays
+
+    if (configDays.Length = 0) {
+        MsgBox("configDays is empty.")
+        return
+    }
+
+    lastDay := 0
+    for _, d in configDays
+        if (d > lastDay)
+            lastDay := d
+
+    lastDate := BusinessDateForDay(lastDay, holidays)
+    dtText := lastDate . " 3:00 PM"
+
+    if !SetClip(dtText) {
+        MsgBox("Failed to set clipboard.")
+        return
+    }
+
+    Sleep 80
+    Send "^v"
+    Sleep 120
+
+    SendTabs(6)
+    Sleep 120
+    Send "e"
+    Sleep 120
+
+    SendTabs(3)
+    Sleep 120
+    Send "c"
+}
+^!y:: {
+    global holidays
+
+    tomorrow := BusinessDateForDay(1, holidays)
+    dtText := tomorrow . " 10:00 AM"
+
+    if !SetClip(dtText) {
+        MsgBox("Failed to set clipboard.")
+        return
+    }
+
+    Sleep 80
+    Send "^v"
+    Sleep 120
+
+    SendTabs(6)
+    Sleep 120
+    Send "P"
+    Sleep 120
+    Send "P"
+    Sleep 120
+
+    SendTabs(3)
+    Sleep 120
+    Send "c"
+}
+
+^!k:: {
+    global configDays, holidays
+
+    noteText := "txt"
+
+    if (configDays.Length = 0) {
+        MsgBox("configDays is empty.")
+        return
+    }
+
+    lastDay := 0
+    for _, d in configDays
+        if (d > lastDay)
+            lastDay := d
+
+    lastDate := BusinessDateForDay(lastDay, holidays)
+    dtText := lastDate . " 3:00 PM"
+
+    if !FocusWorkBrowser() {
+        MsgBox("Browser not detected.")
+        return
+    }
+
+    ; Focus Action dropdown
+    JS_FocusActionDropdown()
+    Sleep 500
+
+    ; Lead Update / Attempted Contact
+    SendEvent "l"
+    Sleep 150
+    SendEvent "{Tab}"
+    Sleep 150
+    SendEvent "{Tab}"
+    Sleep 250
+    SendEvent "1"
+    Sleep 250
+
+    ; Note field
+    SendTabs(9)
+    Sleep 200
+
+    if !SetClip(noteText) {
+        MsgBox("Clipboard failed (note text).")
+        return
+    }
+
+    Sleep 80
+    SendEvent "^v"
+    Sleep 250
+
+    ; Save History Note
+    JS_SaveHistoryNote()
+    Sleep 800
+
+    ; New Appointment
+    JS_AddNewAppointment()
+    Sleep 800
+
+    ; Focus time field
+    JS_FocusDateTimeField()
+    Sleep 300
+
+    if !SetClip(dtText) {
+        MsgBox("Clipboard failed (date).")
+        return
+    }
+
+    Sleep 80
+    SendEvent "^v"
+    Sleep 220
+
+    SendTabs(6)
+    Sleep 150
+    SendEvent "e"
+    Sleep 150
+    SendTabs(3)
+    Sleep 150
+    SendEvent "c"
+    Sleep 250
+
+    ; Final Add New Appointment
+    JS_SaveAppointment()
+    Sleep 400
+}
+
+^!j:: {
+    global holidays
+
+    noteText := "qt"
+
+    tomorrow := BusinessDateForDay(1, holidays)
+    dtText := tomorrow . " 10:00 AM"
+
+    if !FocusWorkBrowser() {
+        MsgBox("Browser not detected.")
+        return
+    }
+
+    ; Focus Action dropdown
+    JS_FocusActionDropdown()
+    Sleep 500
+
+    ; Lead Update / Phone Call (l, Tab, q, Tab, 3)
+    SendEvent "l"
+    Sleep 150
+    SendEvent "{Tab}"
+    Sleep 150
+    SendEvent "q"
+    Sleep 150
+    SendEvent "+{Tab}"
+    Sleep 3050
+    SendEvent "{Tab}"
+    Sleep 250
+    SendEvent "{Tab}"
+    Sleep 250
+    SendEvent "3"
+    Sleep 250
+
+    ; Note field
+    SendTabs(9)
+    Sleep 200
+
+    if !SetClip(noteText) {
+        MsgBox("Clipboard failed (note text).")
+        return
+    }
+
+    Sleep 80
+    SendEvent "^v"
+    Sleep 250
+
+    ; Save History Note
+    JS_SaveHistoryNote()
+    Sleep 800
+
+    ; New Appointment
+    JS_AddNewAppointment()
+    Sleep 800
+
+    ; Focus time field
+    JS_FocusDateTimeField()
+    Sleep 300
+
+    if !SetClip(dtText) {
+        MsgBox("Clipboard failed (date).")
+        return
+    }
+
+    Sleep 80
+    SendEvent "^v"
+    Sleep 220
+
+    SendTabs(6)
+    Sleep 150
+    SendEvent "p"
+    Sleep 150
+    SendEvent "p"
+    Sleep 150
+    SendTabs(3)
+    Sleep 150
+    SendEvent "c"
+    Sleep 250
+
+    ; Final Add New Appointment
+    JS_SaveAppointment()
+    Sleep 400
 }
 
 F8:: {  ; Start/Stop toggle
@@ -412,7 +892,19 @@ EnsureIniDefaults() {
         "Agent.Email", "pablocabrera@allstate.com",
         "Agent.TagSymbol", "+",
         "Schedule.Days", "1,2,4,5",
-        "Times.Offset", "0"
+        "Times.Offset", "0",
+        "Batch.MinVehicles", "0",
+        "Batch.MaxVehicles", "99",
+        "DOB.DefaultDay", "16",
+        "UI.BatchTabsChatToName", "7",
+        "Pricing.OldCar", "98",
+        "Pricing.OneCar", "117",
+        "Pricing.OneCar2020Plus", "167",
+        "Pricing.TwoCars", "176",
+        "Pricing.ThreeCars", "284",
+        "Pricing.FourCars", "397",
+        "Pricing.FiveCars", "397",
+        "Pricing.SingleCarModernYearCutoff", "2020"
     )
 
     for key, val in defaults {
@@ -424,6 +916,32 @@ EnsureIniDefaults() {
         if (existing = "")
             IniWrite(val, iniFile, section, setting)
     }
+}
+
+CsvEscape(value) {
+    text := value ?? ""
+    text := StrReplace(text, '"', '""')
+    return '"' . text . '"'
+}
+
+EnsureBatchLogHeader() {
+    global batchLogFile
+    if !FileExist(batchLogFile) {
+        FileAppend("Timestamp,LeadName,Phone,CarCount,Status`n", batchLogFile, "UTF-8")
+    }
+}
+
+AppendBatchLog(lead, status) {
+    global batchLogFile
+
+    timestamp := FormatTime(A_Now, "yyyy-MM-dd HH:mm:ss")
+    line := CsvEscape(timestamp) ","
+        . CsvEscape(lead["FULL_NAME"]) ","
+        . CsvEscape(lead["PHONE"]) ","
+        . CsvEscape(lead["VEHICLE_COUNT"]) ","
+        . CsvEscape(status) "`n"
+
+    FileAppend(line, batchLogFile, "UTF-8")
 }
 
 ParseDays(str) {
@@ -471,6 +989,18 @@ PasteValue(text) {
     return true
 }
 
+PasteValueRaw(text) {
+    text := text ?? ""
+    if (text = "")
+        return false
+    if !SetClip(text)
+        return false
+    Sleep 60
+    Send "^v"
+    Sleep 90
+    return true
+}
+
 SendTabs(count) {
     Loop count {
         Send "{Tab}"
@@ -495,6 +1025,20 @@ PasteField(value) {
         return true
 
     return PasteValue(value)
+}
+
+PasteFieldSafe(value) {
+    value := value ?? ""
+    if (value = "")
+        return true
+
+    if !SetClip(value)
+        return false
+
+    Sleep 60
+    Send "^v"
+    Sleep 100
+    return true
 }
 
 SelectDropdownValue(value) {
@@ -616,6 +1160,114 @@ SendSelectedBatch(picker) {
 
 ; ===================== BROWSER / DOM HELPERS =====================
 
+RunDevToolsJS(jsCode) {
+    if !FocusWorkBrowser()
+        return false
+
+    savedClip := ClipboardAll()
+
+    try {
+        A_Clipboard := ""
+        Sleep 30
+        A_Clipboard := jsCode
+        if !ClipWait(1)
+            return false
+
+        Send "^+j"
+        Sleep 500
+
+        Send "^a"
+        Sleep 80
+        Send "^v"
+        Sleep 120
+        Send "{Enter}"
+        Sleep 180
+
+        Send "^+j"
+        Sleep 180
+        return true
+    } finally {
+        A_Clipboard := savedClip
+    }
+}
+
+RunDevToolsJSGetResult(jsCode) {
+    if !FocusWorkBrowser()
+        return ""
+
+    savedClip := ClipboardAll()
+    originalClip := A_Clipboard
+
+    try {
+        A_Clipboard := ""
+        Sleep 30
+        A_Clipboard := jsCode
+        if !ClipWait(1)
+            return ""
+
+        sentCode := A_Clipboard
+
+        Send "^+j"
+        Sleep 500
+
+        Send "^a"
+        Sleep 80
+        Send "^v"
+        Sleep 120
+        Send "{Enter}"
+        Sleep 300
+
+        result := ""
+        Loop 20 {
+            Sleep 100
+            if (A_Clipboard != sentCode && Trim(A_Clipboard) != "") {
+                result := Trim(A_Clipboard)
+                break
+            }
+        }
+
+        Send "^+j"
+        Sleep 220
+        FocusWorkBrowser()
+        Sleep 150
+
+        return result
+    } finally {
+        A_Clipboard := savedClip
+    }
+}
+
+JS_FocusActionDropdown() {
+    RunDevToolsJS("(() => { let d = document.querySelectorAll('iframe')[0]?.contentDocument; let el = d?.getElementById('ctl00_ContentPlaceHolder1_DDLogType_Input'); if (!el) return 'NO_ACTION'; el.focus(); ['mouseover','mousedown','mouseup','click'].forEach(t => el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:d.defaultView}))); return 'OK_ACTION'; })()")
+}
+
+JS_SaveHistoryNote() {
+    RunDevToolsJS("(() => { let d = document.querySelectorAll('iframe')[0]?.contentDocument; let el = d?.getElementById('ctl00_ContentPlaceHolder1_btnUpdate_input'); if (!el) return 'NO_SAVE'; el.focus(); ['mouseover','mousedown','mouseup','click'].forEach(t => el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:d.defaultView}))); return 'OK_SAVE'; })()")
+}
+
+JS_AddNewAppointment() {
+    RunDevToolsJS("(() => { let d = document.querySelectorAll('iframe')[0]?.contentDocument; if (!d) return 'NO_FRAME1'; if (typeof d.defaultView.AppointmentInserting === 'function') { d.defaultView.AppointmentInserting(); return 'OK_FUNC'; } let el = d.querySelector('a.js-Lead-Log-Add-New-Appointment'); if (!el) return 'NO_APPT'; el.focus(); ['mouseover','mousedown','mouseup','click'].forEach(t => el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:d.defaultView}))); return 'OK_APPT'; })()")
+}
+
+JS_FocusDateTimeField() {
+    RunDevToolsJS("(() => { let d1 = document.querySelectorAll('iframe')[0]?.contentDocument; let d2 = d1?.querySelectorAll('iframe')[0]?.contentDocument; let el = d2?.getElementById('ctl00_ContentPlaceHolder1_RadDateTimePicker1_dateInput'); if (!el) return 'NO_TIME'; el.focus(); el.select(); return 'OK_TIME'; })()")
+}
+
+JS_SaveAppointment() {
+    RunDevToolsJS("(() => { let d1 = document.querySelectorAll('iframe')[0]?.contentDocument; let d2 = d1?.querySelectorAll('iframe')[0]?.contentDocument; let el = d2?.getElementById('ctl00_ContentPlaceHolder1_lnkSave_input'); if (!el) return 'NO_FINAL'; el.focus(); ['mouseover','mousedown','mouseup','click'].forEach(t => el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:d2.defaultView}))); return 'OK_FINAL'; })()")
+}
+
+ClickAddNewAppointmentJS() {
+    Send "^+j"
+    Sleep 600
+    SendText "document.getElementById('ctl00_ContentPlaceHolder1_lnkSave_input')?.click()"
+    Sleep 150
+    Send "{Enter}"
+    Sleep 300
+    Send "^+j"
+    Sleep 400
+}
+
 FocusEdge() {
     if WinExist("ahk_exe msedge.exe") {
         WinActivate
@@ -640,6 +1292,42 @@ FocusWorkBrowser() {
     if FocusEdge()
         return true
     return false
+}
+
+FocusSlateComposer() {
+    return RunDevToolsJS("(() => { let el = document.querySelector('[data-slate-editor=`"true`"]'); if (!el) return 'NO_COMPOSER'; el.focus(); return 'OK_COMPOSER'; })()")
+}
+
+BuildParticipantInputFocusJS() {
+    global participantInputJsFile
+    if !FileExist(participantInputJsFile)
+        return ""
+
+    return Trim(FileRead(participantInputJsFile, "UTF-8"))
+}
+
+RunParticipantInputFocus() {
+    js := BuildParticipantInputFocusJS()
+    if (js = "")
+        return ""
+    return RunDevToolsJSGetResult(js)
+}
+
+EnsureParticipantInputReady() {
+    result := RunParticipantInputFocus()
+    if (result = "OK_PARTICIPANT_INPUT")
+        return true
+
+    if !FocusWorkBrowser()
+        return false
+
+    ToolTip("Click on the To: field, then release to continue.")
+    KeyWait "LButton"
+    KeyWait "LButton", "D"
+    KeyWait "LButton"
+    ToolTip()
+    Sleep 150
+    return true
 }
 
 ; ===================== TEXT / ARRAY SUPPORT HELPERS =====================
@@ -748,7 +1436,9 @@ NewProspectFields() {
         "CITY", "",
         "STATE", "",
         "ZIP", "",
-        "PHONE", ""
+        "PHONE", "",
+        "EMAIL", "",
+        "RAW_NAME", ""
     )
 }
 
@@ -768,13 +1458,44 @@ NormalizeProspectInput(raw) {
     if IsLabeledLeadFormat(raw)
         return ParseLabeledLeadToProspect(raw)
 
+    if IsLikelyBatchGridInput(raw)
+        return ParseBatchGridRow(ExtractFirstBatchGridRow(raw))
+
     if RegExMatch(raw, "i)PERSONAL\s+LEAD")
         return ParseBatchCRMToProspect(raw)
 
     return NormalizeRawLeadToProspect(raw)
 }
 
+IsLikelyBatchGridInput(raw) {
+    firstRow := ExtractFirstBatchGridRow(raw)
+    if (firstRow = "")
+        return false
+
+    cols := StrSplit(firstRow, "`t")
+    return cols.Length >= 11
+        && RegExMatch(Trim(cols[1]), "i)PERSONAL\s+LEAD")
+        && IsTimestampToken(cols[4])
+        && NormalizeZip(cols[8]) != ""
+        && NormalizePhone(cols[9]) != ""
+}
+
+ExtractFirstBatchGridRow(raw) {
+    clean := StrReplace(raw, "`r", "")
+    for _, line in StrSplit(clean, "`n") {
+        line := Trim(line)
+        if (line = "")
+            continue
+        if InStr(line, "`t") && RegExMatch(line, "i)PERSONAL\s+LEAD")
+            return line
+    }
+    return ""
+}
+
 ParseBatchCRMToProspect(raw) {
+    if IsLikelyBatchGridInput(raw)
+        return ParseBatchGridRow(ExtractFirstBatchGridRow(raw))
+
     fields := NewProspectFields()
 
     ; If multiple leads, take the first one
@@ -1232,6 +1953,9 @@ NormalizeAddressMap(fields) {
 
     NormalizeCityStateZipFields(&city, &state, &zip)
 
+    if (state != "")
+        address1 := Trim(RegExReplace(address1, "i)\s+,?\s*" state "\s*$", ""), " ,")
+
     fields["ADDRESS_1"] := address1
     fields["CITY"]      := NormalizeCity(city)
     fields["STATE"]     := NormalizeState(state)
@@ -1383,7 +2107,8 @@ NormalizePhone(phone) {
 }
 
 IsEmailToken(token) {
-    return InStr(token, "@") && RegExMatch(token, "\.")
+    token := Trim(token)
+    return RegExMatch(token, "i)^[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}$")
 }
 
 IsTimestampToken(token) {
@@ -1418,82 +2143,83 @@ IsBetterDOBCandidate(newDob, currentDob) {
 }
 
 NormalizeDOB(dob) {
+    global dobDefaultDay
     text := Trim(dob)
     if (text = "")
         return ""
 
+    if RegExMatch(text, "\(([^()]*)\)", &mp) {
+        inner := NormalizeDOB(mp[1])
+        if (inner != "")
+            return inner
+    }
+
     work := StrLower(text)
-    work := RegExReplace(work, "\s+", " ")
-    work := Trim(work)
+    work := NormalizeMonthWords(work)
 
-    work := RegExReplace(work, "[\(\)]", " ")
-    work := RegExReplace(work, "\s+", " ")
-    work := Trim(work)
-
-    ; Age stripping BEFORE comma removal (so "40," still has its comma)
-    work := RegExReplace(work, "i)^\s*age\s*\d{1,3}\s*,?\s*", "")
-    work := RegExReplace(work, "i)^\s*\d{1,3}\s*(?:años|anos)\s*,?\s*", "")
-    work := RegExReplace(work, "i)^\s*\d{1,3}\s*,\s*", "")
-
-    ; NOW strip commas for date parsing
-    work := RegExReplace(work, ",", " ")
-    work := RegExReplace(work, "\s+", " ")
-    work := Trim(work)
-
+    work := RegExReplace(work, "i)\bborn\s+in\b", " ")
+    work := RegExReplace(work, "i)\bborn\b", " ")
     work := RegExReplace(work, "i)\bnacid[oa]\s+en\b", " ")
     work := RegExReplace(work, "i)\bnaci[oó]\s+en\b", " ")
-    work := RegExReplace(work, "i)\bconfirm(?:ar|ado|ada|ed)?\b", " ")
-    work := RegExReplace(work, "i)\bborn\b", " ")
-    work := RegExReplace(work, "i)\bde\b", " ")
-    work := RegExReplace(work, "i)\s+\d{1,3}\s*(?:años|anos)$", "")
+    work := RegExReplace(work, "i)\bconfirm\b", " ")
 
-    work := NormalizeMonthWords(work)
+    work := RegExReplace(work, "i)^\s*age\s*:?\s*\d{1,3}\s*,?\s*", "")
+    work := RegExReplace(work, "i)^\s*\d{1,3}\s*(?:años|anos)\s*,?\s*", "")
+    work := RegExReplace(work, "i)^\s*\d{1,3}\s*,\s*", "")
+    work := RegExReplace(work, "i)\s*/\s*\d{1,3}\s*(?:años|anos)\s*$", "")
+    work := RegExReplace(work, "i)\s+\d{1,3}\s*(?:años|anos)\s*$", "")
+
+    work := RegExReplace(work, "[\(\)]", " ")
     work := RegExReplace(work, "[\.,;:]+", " ")
-    work := RegExReplace(work, "[\s\./,;:]+$", "")
+    work := RegExReplace(work, "\s+", " ")
     work := Trim(work)
 
-    if RegExMatch(work, "i)^(\d{1,2})[-\s](jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[-\s](\d{2,4})$", &m) {
+    if RegExMatch(work, "i)^(\d{1,2})[-\s](jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)[-\s](\d{2,4})$", &m) {
         month := MonthNumber(m[2])
         if month
             return FormatDateString(month, Integer(m[1]), NormalizeYear(m[3]))
     }
 
-    if RegExMatch(work, "i)^(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\s+(\d{4})$", &m) {
+    if RegExMatch(work, "i)^(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\s+(\d{4})$", &m) {
         month := MonthNumber(m[2])
         if month
             return FormatDateString(month, Integer(m[1]), Integer(m[3]))
     }
 
-    if RegExMatch(work, "i)^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\s+(\d{1,2})\s+(\d{4})$", &m) {
+    if RegExMatch(work, "i)^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\s+(\d{1,2})\s+(\d{4})$", &m) {
         month := MonthNumber(m[1])
         if month
             return FormatDateString(month, Integer(m[2]), Integer(m[3]))
     }
 
-    if RegExMatch(work, "i)^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\s+(\d{4})$", &m) {
+    if RegExMatch(work, "i)^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)[-\s](\d{2,4})$", &m) {
         month := MonthNumber(m[1])
         if month
-            return FormatDateString(month, 16, Integer(m[2]))
+            return FormatDateString(month, dobDefaultDay, NormalizeYear(m[2]))
     }
 
-if RegExMatch(work, "^(\d{1,2})/(\d{1,2})/(\d{2,4})$", &m) {
-    p1 := Integer(m[1])
-    p2 := Integer(m[2])
-    yr := NormalizeYear(m[3])
+    if RegExMatch(work, "i)^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)\s+(\d{4})$", &m) {
+        month := MonthNumber(m[1])
+        if month
+            return FormatDateString(month, dobDefaultDay, Integer(m[2]))
+    }
 
-    ; If clearly DD/MM/YYYY, swap
-    if (p1 > 12 && p2 <= 12)
-        return FormatDateString(p2, p1, yr)
+    if RegExMatch(work, "^(\d{1,2})/(\d{1,2})/(\d{2,4})$", &m) {
+        p1 := Integer(m[1])
+        p2 := Integer(m[2])
+        yr := NormalizeYear(m[3])
 
-    ; Default to MM/DD/YYYY
-    return FormatDateString(p1, p2, yr)
-}
+        if (p1 > 12 && p2 <= 12)
+            return FormatDateString(p2, p1, yr)
+
+        return FormatDateString(p1, p2, yr)
+    }
 
     if RegExMatch(work, "^(\d{4})-(\d{1,2})-(\d{1,2})$", &m)
         return FormatDateString(Integer(m[2]), Integer(m[3]), Integer(m[1]))
 
     if RegExMatch(work, "^(\d{1,2})/(\d{4})$", &m)
-        return FormatDateString(Integer(m[1]), 16, Integer(m[2]))
+        return FormatDateString(Integer(m[1]), dobDefaultDay, Integer(m[2]))
 
     return ""
 }
@@ -1501,18 +2227,30 @@ if RegExMatch(work, "^(\d{1,2})/(\d{1,2})/(\d{2,4})$", &m) {
 NormalizeMonthWords(text) {
     static monthMap := Map(
         "enero", "january",
+        "ene", "jan",
         "febrero", "february",
+        "feb", "feb",
         "marzo", "march",
+        "mar", "mar",
         "abril", "april",
+        "abr", "apr",
         "mayo", "may",
         "junio", "june",
+        "jun", "jun",
         "julio", "july",
+        "jul", "jul",
         "agosto", "august",
+        "ago", "aug",
         "septiembre", "september",
         "setiembre", "september",
+        "sep", "sep",
+        "set", "sep",
         "octubre", "october",
+        "oct", "oct",
         "noviembre", "november",
-        "diciembre", "december"
+        "nov", "nov",
+        "diciembre", "december",
+        "dic", "dec"
     )
 
     for spanish, english in monthMap
@@ -1551,6 +2289,110 @@ FormatDateString(month, day, year) {
     return Format("{:02}/{:02}/{:04}", month, day, year)
 }
 
+; ===================== QUO TAG SELECTOR / TEST HELPERS =====================
+
+tagSelectorJsFile := A_ScriptDir "\js for tag selector.js"
+
+QuoBuildTagSelectorJS() {
+    global tagSelectorJsFile
+    if !FileExist(tagSelectorJsFile) {
+        MsgBox("Missing file: " tagSelectorJsFile "`n`nPlace 'js for tag selector.js' next to the script.")
+        return ""
+    }
+
+    js := Trim(FileRead(tagSelectorJsFile, "UTF-8"))
+    if (js = "")
+        return ""
+
+    if RegExMatch(js, "i)^\s*copy\s*\(")
+        return js
+
+    return "copy(String(" . js . "))"
+}
+
+RunQuoTagSelector() {
+    js := QuoBuildTagSelectorJS()
+    if (js = "")
+        return ""
+    return RunDevToolsJSGetResult(js)
+}
+
+QuoDeleteAddTagConfirm(tagText) {
+    global BATCH_BEFORE_TAG_PASTE, BATCH_AFTER_TAG_PASTE, BATCH_AFTER_ENTER
+
+    if !FocusWorkBrowser()
+        return false
+
+    Sleep 120
+    Send "{Backspace}"
+    Sleep 120
+
+    Sleep BATCH_BEFORE_TAG_PASTE
+    if !PasteValueRaw(tagText)
+        return false
+    Sleep BATCH_AFTER_TAG_PASTE
+
+    Send "{Enter}"
+    Sleep BATCH_AFTER_ENTER
+    Send "{Enter}"
+    Sleep BATCH_AFTER_ENTER
+
+    FocusSlateComposer()
+    Sleep 200
+
+    return true
+}
+
+QuoPrepareFieldThenAddTag(tagText) {
+    if !FocusWorkBrowser()
+        return false
+
+    Send "{Tab}"
+    Sleep 220
+    Send "{Tab}"
+    Sleep 220
+    Send "{Enter}"
+    Sleep 300
+
+    return QuoDeleteAddTagConfirm(tagText)
+}
+
+HandleQuoTagSelectorResult(result, tagText) {
+    if !FocusWorkBrowser()
+        return "FAILED - Browser lost focus"
+
+    if (result = "PLUS_FALLBACK") {
+        if !QuoDeleteAddTagConfirm(tagText)
+            return "FAILED - PLUS_FALLBACK sequence failed"
+        return "OK"
+    }
+
+    if (result = "HITTEST_TARGET" || result = "STRUCTURE_TARGET" || result = "ANCESTOR_TARGET" || result = "LOCAL_TARGET") {
+        if !QuoPrepareFieldThenAddTag(tagText)
+            return "FAILED - " result " sequence failed"
+        return "OK"
+    }
+
+    if (result = "NO_TARGET")
+        return "PAUSED - No tag target"
+
+    if (result = "")
+        return "FAILED - Blank selector result"
+
+    return "FAILED - Unhandled selector result: " result
+}
+
+ApplyQuoTag(tagText) {
+    tagText := Trim(tagText)
+    if (tagText = "")
+        return "FAILED - Blank tag value"
+
+    result := RunQuoTagSelector()
+    if (result = "")
+        return "FAILED - Blank selector result"
+
+    return HandleQuoTagSelectorResult(result, tagText)
+}
 ; ===================== DATE / BUSINESS-DAY HELPERS =====================
 
 IsHoliday(mmddyyyy, holidaysArr) {
@@ -1592,38 +2434,6 @@ AddBusinessDays(startYYYYMMDD, k, holidaysArr) {
     Loop k
         ymd := NextBusinessDateYYYYMMDD(ymd, holidaysArr)
     return ymd
-}
-
-; Returns yyyyMMdd of the next Monday after startYYYYMMDD.
-; If that Monday is a holiday, advances one day to Tuesday.
-NextMondayYYYYMMDD(startYYYYMMDD, holidaysArr) {
-    ts := startYYYYMMDD
-    if (StrLen(ts) = 8)
-        ts := ts . "000000"
-    else if (StrLen(ts) != 14)
-        ts := FormatTime(A_Now, "yyyyMMddHHmmss")
-
-    Loop {
-        ts := DateAdd(ts, 1, "D")
-        wday := Integer(FormatTime(ts, "WDay"))
-        if (wday = 2) {   ; AHK WDay: 1=Sun 2=Mon 3=Tue 4=Wed 5=Thu 6=Fri 7=Sat
-            mmddyyyy := FormatTime(ts, "MM/dd/yyyy")
-            if IsHoliday(mmddyyyy, holidaysArr)
-                ts := DateAdd(ts, 1, "D")   ; holiday Monday → Tuesday
-            return FormatTime(ts, "yyyyMMdd")
-        }
-    }
-}
-
-; Returns array of 3 MM/dd/yyyy strings for the next 3 Mondays (holiday-aware).
-BuildNextThreeMondays(holidaysArr) {
-    arr := []
-    last := FormatTime(A_Now, "yyyyMMdd")
-    Loop 3 {
-        last := NextMondayYYYYMMDD(last, holidaysArr)
-        arr.Push(FormatTime(last . "000000", "MM/dd/yyyy"))
-    }
-    return arr
 }
 
 BuildBusinessDates(n, holidaysArr) {
@@ -1720,7 +2530,7 @@ ScheduleMessageTyped(msgText, dateMDY, time12) {
     return true
 }
 
-BuildMessage(leadName, carCount, vehicles := "") {
+BuildMessage(leadName, carCount, vehicles := "", useBatchSingleCarPricing := false) {
     global agentName, agentEmail
     greeting := (A_Hour < 12) ? "Buenos días" : "Buenas tardes"
 
@@ -1741,8 +2551,7 @@ BuildMessage(leadName, carCount, vehicles := "") {
     if (carCount = 5)
         coverageLine := "`n`nBodily Injury $100k per person $300k per ocurrence`nProperty Damage $100k per ocurrence"
 
-    prices := Map(0, "$98", 1, "$117", 2, "$176", 3, "$284", 4, "$397", 5, "$397")
-    price  := prices.Has(carCount) ? prices[carCount] : "$127"
+    price := ResolveQuotePrice(carCount, vehicles, useBatchSingleCarPricing)
     coverageSuffix := " al mes."
 
     return Format("
@@ -1774,6 +2583,38 @@ BuildMessage(leadName, carCount, vehicles := "") {
     , agentName, agentEmail)
 }
 
+ResolveQuotePrice(carCount, vehicles := "", useBatchSingleCarPricing := false) {
+    global priceOldCar, priceOneCar, priceOneCar2020Plus
+    global priceTwoCars, priceThreeCars, priceFourCars, priceFiveCars
+    global singleCarModernYearCutoff
+
+    if (useBatchSingleCarPricing && carCount = 1) {
+        vehicleYear := ExtractVehicleYearFromList(vehicles)
+        if (vehicleYear >= singleCarModernYearCutoff)
+            return FormatMonthlyPrice(priceOneCar2020Plus)
+        return FormatMonthlyPrice(priceOneCar)
+    }
+
+    prices := Map(0, priceOldCar, 1, priceOneCar, 2, priceTwoCars, 3, priceThreeCars, 4, priceFourCars, 5, priceFiveCars)
+    return prices.Has(carCount) ? FormatMonthlyPrice(prices[carCount]) : "$127"
+}
+
+ExtractVehicleYearFromList(vehicles) {
+    if !(IsObject(vehicles) && vehicles.Length >= 1)
+        return 0
+    return ExtractVehicleYear(vehicles[1])
+}
+
+ExtractVehicleYear(vehicleText) {
+    if RegExMatch(vehicleText, "i)\b((19|20)\d{2})\b", &m)
+        return Integer(m[1])
+    return 0
+}
+
+FormatMonthlyPrice(amount) {
+    return "$" . Integer(amount)
+}
+
 BuildFollowupQueue(leadName, offset) {
     global agentName, configDays, holidays
     leadName := ExtractFirstName(ProperCase(leadName))
@@ -1799,89 +2640,61 @@ BuildFollowupQueue(leadName, offset) {
     t5_1 := TimeWithOffset(12, 0, 0, offset)
     t5_2 := TimeWithOffset(12, 1, 0, offset)
 
-msgs := [
-    ; -------- Block A (config day dA) --------
-    Map("day", dA, "seq", 1, "text", "Buenos días, " . leadName . ".", "date", DA_date, "time", t1_1),
-    Map("day", dA, "seq", 2, "text", "Soy " . agentName . " de Allstate. Ya le preparé una cotización para su auto.", "date", DA_date, "time", t1_2),
-    Map("day", dA, "seq", 3, "text", "En muchos casos logramos bajar el pago mensual sin quitar coberturas. Si gusta, se la resumo en 2 minutos por aquí.", "date", DA_date, "time", t1_3),
-    Map("day", dA, "seq", 4, "text", "Si me responde “Sí”, se la envío ahora mismo.", "date", DA_date, "time", t1_4),
+    msgs := [
+        Map("day", dA, "seq", 1, "text", "Buenos días, " . leadName . ".", "date", DA_date, "time", t1_1),
+        Map("day", dA, "seq", 2, "text", "Soy " . agentName . " de Allstate. Ya le preparé la cotización de su auto.", "date", DA_date, "time", t1_2),
+        Map("day", dA, "seq", 3, "text", "En muchos casos logramos bajar el pago mensual sin quitar coberturas. Si gusta, se la resumo en 2 minutos por aquí.", "date", DA_date, "time", t1_3),
+        Map("day", dA, "seq", 4, "text", "Si me responde “Sí”, se la envío ahora mismo.", "date", DA_date, "time", t1_4),
 
-    ; -------- Block B (config day dB) --------
-    Map("day", dB, "seq", 1, "text", "Hola, " . leadName . ".", "date", DB_date, "time", t2_1),
-    Map("day", dB, "seq", 2, "text", "Hoy intenté comunicarme con usted porque todavía puedo revisar si califica a descuentos disponibles. Si me responde “Revisar”, yo me encargo de validar todo por usted.", "date", DB_date, "time", t2_2),
+        Map("day", dB, "seq", 1, "text", "Hola, " . leadName . ".", "date", DB_date, "time", t2_1),
+        Map("day", dB, "seq", 2, "text", "Hoy intenté comunicarme con usted porque todavía puedo revisar si califica a descuentos disponibles. Si me responde “Revisar”, yo me encargo de validar todo por usted.", "date", DB_date, "time", t2_2),
 
-    ; -------- Block C (config day dC) --------
-    Map("day", dC, "seq", 1, "text", "Buenas tardes, " . leadName . ".", "date", DC_date, "time", t4_1),
-    Map("day", dC, "seq", 2, "text", "Esta semana hemos ayudado a varios conductores a comparar su póliza actual con Allstate y en muchos casos encontraron una mejor opción. Si me escribe “Comparar”, reviso su caso inmediatamente ", "date", DC_date, "time", t4_2),
+        Map("day", dC, "seq", 1, "text", "Buenas tardes, " . leadName . ".", "date", DC_date, "time", t4_1),
+        Map("day", dC, "seq", 2, "text", "Esta semana hemos ayudado a varios conductores a comparar su póliza actual con Allstate y en muchos casos encontraron una mejor opción. Si me responde “Comparar”, reviso su caso y le digo honestamente si le conviene o no. Reply STOP to unsubscribe", "date", DC_date, "time", t4_2),
 
-    ; -------- Block D (config day dD) --------
-    Map("day", dD, "seq", 1, "text", leadName . ", sigo teniendo su cotización disponible, pero normalmente cierro las cotizaciones cuando no recibo respuesta.", "date", DD_date, "time", t5_1),
-    Map("day", dD, "seq", 2, "text", "Si todavía desea revisarla, escribame “Continuar” y le envío la cotizacion por aquí.", "date", DD_date, "time", t5_2)
-]
-return msgs
-}
-
-BuildPaymentQueue(leadName) {
-    global agentName, holidays
-    leadName := ExtractFirstName(ProperCase(leadName))
-    mondays  := BuildNextThreeMondays(holidays)
-
-    msg := "¡URGENTE! - CANCELACIÓN DE PÓLIZA DE AUTO DE ALLSTATE 🔴🚦`n"
-        . "Soy " . agentName . " de Allstate. Me pongo en contacto para informarle que su póliza tiene un pago pendiente. Quería saber si necesita que le ayudemos a realizar el pago.`n"
-        . "***Por favor contáctenos lo antes posible para evitar la cancelación de la póliza. 🙏🏻🚗`n"
-        . agentName . "`n"
-        . "Agente de Allstate`n"
-        . "Línea de Oficina: (754) 236-8009"
-
-    return [
-        Map("text", msg, "date", mondays[1], "time", "09:00:00 AM"),
-        Map("text", msg, "date", mondays[2], "time", "10:00:00 AM"),
-        Map("text", msg, "date", mondays[3], "time", "09:30:00 AM")
+        Map("day", dD, "seq", 1, "text", leadName . ", sigo teniendo su cotización disponible, pero normalmente cierro los pendientes cuando no recibo respuesta.", "date", DD_date, "time", t5_1),
+        Map("day", dD, "seq", 2, "text", "Si todavía quiere revisarla, respóndame “Continuar” y le envío el resumen por aquí.", "date", DD_date, "time", t5_2)
     ]
-}
-
-BuildPaymentQueueEnglish(leadName) {
-    global agentName, holidays
-    leadName := ExtractFirstName(ProperCase(leadName))
-    mondays  := BuildNextThreeMondays(holidays)
-
-    msg := "URGENT! - ALLSTATE AUTO POLICY CANCELLATION 🔴🚦`n`n"
-        . "This is " . agentName . " from Allstate. I am reaching out to inform you that your policy has a pending payment. I wanted to know if you need us to help you make the payment?`n`n"
-        . "***Please contact us as soon as possible to avoid policy cancellation. 🙏🏻🚗`n`n"
-        . agentName . "`n"
-        . "Allstate Agent`n"
-        . "Office Line: (754) 236-8009"
-
-    return [
-        Map("text", msg, "date", mondays[1], "time", "09:00:00 AM"),
-        Map("text", msg, "date", mondays[2], "time", "10:00:00 AM"),
-        Map("text", msg, "date", mondays[3], "time", "09:30:00 AM")
-    ]
+    return msgs
 }
 
 ; ===================== BATCH LEAD WORKFLOWS =====================
 
 ParseBatchGridRow(raw) {
+    fields := NewProspectFields()
     cols := StrSplit(raw, "`t")
+    if (cols.Length < 11)
+        return fields
 
-    ; map by known grid order
-    ; Name | Folder | Status | Assigned On | Address 1 | City | State/Province | Zip Code | Phone | Custom 5 | Custom 7 | Custom 8 | Custom 9 | Custom 10
-fields := Map()
-fields["RAW_NAME"]  := cols[1]
-fields["ADDRESS_1"] := Trim(cols[5])
-fields["CITY"]      := NormalizeCity(cols[6])
-fields["STATE"]     := NormalizeState(cols[7])
-fields["ZIP"]       := NormalizeZip(cols[8])
-fields["PHONE"]     := NormalizePhone(cols[9])
-fields["DOB"]       := NormalizeDOB(cols[10])
-fields["GENDER"]    := NormalizeGender(cols[11])
+    fields["RAW_NAME"]  := Trim(cols[1])
+    fields["ADDRESS_1"] := Trim(cols[5])
+    fields["CITY"]      := NormalizeCity(cols[6])
+    fields["STATE"]     := NormalizeState(cols[7])
+    fields["ZIP"]       := NormalizeZip(cols[8])
+    fields["PHONE"]     := NormalizePhone(cols[9])
 
-nameText := ExtractBatchName(cols[1])
-if (nameText != "")
-    ApplyLeadName(fields, nameText)
+    idx := 10
+    if (cols.Length >= idx && IsEmailToken(cols[idx])) {
+        fields["EMAIL"] := Trim(cols[idx])
+        idx += 1
+    }
 
-NormalizeAddressMap(fields)
-return fields
+    if (cols.Length >= idx)
+        fields["DOB"] := NormalizeDOB(cols[idx])
+    if (cols.Length >= idx + 1)
+        fields["GENDER"] := NormalizeGender(cols[idx + 1])
+
+    nameText := ExtractBatchName(cols[1])
+    if (nameText != "")
+        ApplyLeadName(fields, nameText)
+
+    NormalizeAddressMap(fields)
+    fields["DOB"]    := NormalizeDOB(fields["DOB"])
+    fields["GENDER"] := NormalizeGender(fields["GENDER"])
+    fields["STATE"]  := NormalizeState(fields["STATE"])
+    fields["ZIP"]    := NormalizeZip(fields["ZIP"])
+    fields["PHONE"]  := NormalizePhone(fields["PHONE"])
+    return fields
 }
 
 ParseBatchLeadRows(raw) {
@@ -1921,6 +2734,8 @@ ExtractBatchPhone(raw) {
 ExtractVehicleList(rawLead) {
     vehicles := []
 
+    rawLead := StripGridActionText(rawLead)
+
     vehicleText := ""
     if RegExMatch(rawLead, "i)(?:Male|Female)\s*(.*)", &m)
         vehicleText := Trim(m[1])
@@ -1928,13 +2743,14 @@ ExtractVehicleList(rawLead) {
     if (vehicleText = "")
         return vehicles
 
-    split := RegExReplace(vehicleText, "i)((19|20)\d{2})(\s+[A-Za-z])", "`n$1$3")
+    vehicleText := StripGridActionText(vehicleText)
+    split := RegExReplace(vehicleText, "i)((19|20)\d{2})(\s*/?[\s]*[A-Za-z])", "`n$1$3")
 
     for _, part in StrSplit(split, "`n") {
-        part := Trim(part)
+        part := SanitizeVehicleLine(part)
         if (part = "")
             continue
-        if RegExMatch(part, "i)^(19|20)\d{2}\s+[A-Za-z]")
+        if RegExMatch(part, "i)^(19|20)\d{2}\s*/?[\s]*[A-Za-z]")
             vehicles.Push(ProperCasePhrase(part))
     }
 
@@ -1943,6 +2759,8 @@ ExtractVehicleList(rawLead) {
 
 BuildBatchLeadRecord(rawLead) {
     global tagSymbol
+
+    rawLead := StripGridActionText(rawLead)
 
     batchName  := ExtractBatchName(rawLead)
     batchPhone := ExtractBatchPhone(rawLead)
@@ -1954,8 +2772,11 @@ BuildBatchLeadRecord(rawLead) {
     parts := StrSplit(Trim(fullName), " ")
     lastName  := (parts.Length >= 2) ? parts[parts.Length] : ""
 
-    holderName := tagSymbol . " " . fullName
-    tagValue   := tagSymbol
+    tagValue   := Trim(tagSymbol)
+    if (tagValue = "")
+        tagValue := "+"
+
+    holderName := tagValue . " " . fullName
 
     return Map(
         "RAW", rawLead,
@@ -1970,11 +2791,296 @@ BuildBatchLeadRecord(rawLead) {
 }
 
 BuildBatchLeadHolder(raw) {
+    global batchMinVehicles, batchMaxVehicles
+
     holder := []
     rows := ParseBatchLeadRows(raw)
-    for _, row in rows
-        holder.Push(BuildBatchLeadRecord(row))
+
+    for _, row in rows {
+        lead := BuildBatchLeadRecord(row)
+        vc := lead["VEHICLE_COUNT"]
+
+        if (vc < batchMinVehicles || vc > batchMaxVehicles)
+            continue
+
+        holder.Push(lead)
+    }
     return holder
+}
+
+ScheduleBuilderForLead(lead, offset) {
+    global SLOW_AFTER_SCHED, SLOW_AFTER_DT_PASTE, SLOW_AFTER_ENTER
+
+    dt := GetInitialQuoteDateTime(offset)
+    msg := BuildMessage(lead["FULL_NAME"], lead["VEHICLE_COUNT"], lead["VEHICLES"], true)
+
+    if !FocusWorkBrowser() {
+        MsgBox("Browser not found/active.")
+        return false
+    }
+    Sleep 200
+
+    if !SetClip(msg)
+        return false
+    Sleep 80
+    Send "^v"
+    Sleep 400
+
+    Send "^!{Enter}"
+    Sleep SLOW_AFTER_SCHED
+
+    SendText dt["date"] . " " . dt["time"]
+    Sleep SLOW_AFTER_DT_PASTE
+
+    Send "{Enter}"
+    Sleep SLOW_AFTER_ENTER
+    return true
+}
+
+ScheduleRegularFollowupsForLead(lead, offset) {
+    msgs := BuildFollowupQueue(lead["FULL_NAME"], offset)
+    for m in msgs {
+        ok := ScheduleMessageTyped(m["text"], m["date"], m["time"])
+        if !ok
+            return false
+    }
+    return true
+}
+
+RunBatchLeadFlow(lead) {
+    global BATCH_AFTER_ALTN, BATCH_AFTER_PHONE, BATCH_AFTER_TAB
+    global BATCH_AFTER_SCHEDULE, BATCH_AFTER_ENTER, BATCH_AFTER_NAME_PICK, BATCH_AFTER_TAG_PICK
+    global BATCH_BEFORE_TAG_PASTE, BATCH_AFTER_TAG_PASTE, batchTabsChatToName
+
+    if !FocusWorkBrowser()
+        return "FAILED - Browser lost focus"
+
+    Sleep 150
+
+    if (lead["PHONE"] = "" || lead["FULL_NAME"] = "")
+        return "SKIPPED - Missing phone or name"
+
+    offset := NextRotationOffset()
+
+    Send "!n"
+    Sleep BATCH_AFTER_ALTN
+
+    if !EnsureParticipantInputReady()
+        return "FAILED - Could not focus To field"
+    sleep 150
+
+    if !PasteValue(lead["PHONE"])
+        return "FAILED - Could not paste phone"
+    Sleep BATCH_AFTER_PHONE
+
+    Send "{Tab}"
+    Sleep BATCH_AFTER_TAB
+    Send "{Tab}"
+    Sleep 1000
+    FocusSlateComposer()
+
+    if !ScheduleBuilderForLead(lead, offset)
+        return "FAILED - Builder scheduling failed"
+    Sleep BATCH_AFTER_SCHEDULE
+
+    if !ScheduleRegularFollowupsForLead(lead, offset)
+        return "FAILED - Follow-up scheduling failed"
+    Sleep BATCH_AFTER_SCHEDULE
+
+    ; move to the lead name field and select the created lead
+    Sleep 400
+    SendTabs(batchTabsChatToName)
+    Sleep 200
+    Send "{Enter}"
+    Sleep BATCH_AFTER_ENTER
+
+    Send "^a"
+    Sleep 80
+    if !PasteValue(lead["HOLDER_NAME"])
+        return "FAILED - Could not paste holder into name field"
+    Sleep BATCH_AFTER_NAME_PICK
+
+    Send "{Enter}"
+    Sleep BATCH_AFTER_ENTER
+
+        Sleep 300
+		
+    tagStatus := ApplyQuoTag(lead["TAG_VALUE"])
+    if (tagStatus != "OK")
+        return tagStatus
+
+    return "OK"
+}
+
+ScheduleBuilderForLeadFast(lead, offset) {
+    dt := GetInitialQuoteDateTime(offset)
+    msg := BuildMessage(lead["FULL_NAME"], lead["VEHICLE_COUNT"], lead["VEHICLES"], true)
+
+    if !FocusWorkBrowser() {
+        MsgBox("Browser not found/active.")
+        return false
+    }
+    Sleep 200
+
+    if !SetClip(msg)
+        return false
+    Sleep 80
+    Send "^v"
+    Sleep 400
+
+    Send "^!{Enter}"
+    Sleep 300
+
+    A_Clipboard := ""
+    Sleep 50
+    A_Clipboard := dt["date"] . " " . dt["time"]
+    if !ClipWait(1)
+        return false
+    Sleep 80
+    Send "^v"
+    Sleep 300
+    Send "{Enter}"
+    Sleep 200
+    return true
+}
+
+ScheduleRegularFollowupsForLeadFast(lead, offset) {
+    msgs := BuildFollowupQueue(lead["FULL_NAME"], offset)
+    for m in msgs {
+        ok := ScheduleMessage(m["text"], m["date"], m["time"])
+        if !ok
+            return false
+    }
+    return true
+}
+
+RunBatchLeadFlowFast(lead) {
+    global BATCH_AFTER_ALTN, BATCH_AFTER_PHONE, BATCH_AFTER_TAB
+    global BATCH_AFTER_SCHEDULE, BATCH_AFTER_ENTER, BATCH_AFTER_NAME_PICK, BATCH_AFTER_TAG_PICK
+    global BATCH_BEFORE_TAG_PASTE, BATCH_AFTER_TAG_PASTE, batchTabsChatToName
+
+    if !FocusWorkBrowser()
+        return "FAILED - Browser lost focus"
+
+    Sleep 150
+
+    if (lead["PHONE"] = "" || lead["FULL_NAME"] = "")
+        return "SKIPPED - Missing phone or name"
+
+    offset := NextRotationOffset()
+
+    Send "!n"
+    Sleep BATCH_AFTER_ALTN
+
+    if !EnsureParticipantInputReady()
+        return "FAILED - Could not focus To field"
+
+    if !PasteValue(lead["PHONE"])
+        return "FAILED - Could not paste phone"
+    Sleep BATCH_AFTER_PHONE
+
+    Send "{Tab}"
+    Sleep BATCH_AFTER_TAB
+    Send "{Tab}"
+    Sleep 1000
+    FocusSlateComposer()
+
+    if !ScheduleBuilderForLeadFast(lead, offset)
+        return "FAILED - Builder scheduling failed"
+    Sleep BATCH_AFTER_SCHEDULE
+
+    if !ScheduleRegularFollowupsForLeadFast(lead, offset)
+        return "FAILED - Follow-up scheduling failed"
+    Sleep BATCH_AFTER_SCHEDULE
+
+    Sleep 400
+    SendTabs(batchTabsChatToName)
+    Sleep 200
+    Send "{Enter}"
+    Sleep BATCH_AFTER_ENTER
+
+    Send "^a"
+    Sleep 80
+    if !PasteValue(lead["HOLDER_NAME"])
+        return "FAILED - Could not paste holder into name field"
+    Sleep BATCH_AFTER_NAME_PICK
+
+    Send "{Enter}"
+    Sleep BATCH_AFTER_ENTER
+
+    Sleep 300
+
+    tagStatus := ApplyQuoTag(lead["TAG_VALUE"])
+    if (tagStatus != "OK")
+        return tagStatus
+
+    return "OK"
+}
+
+SanitizeVehicleLine(text) {
+    text := StripGridActionText(text)
+    text := RegExReplace(text, "\s*/\s*", " ")   ; <-- ADD THIS LINE
+    text := RegExReplace(text, "\s+", " ")        ; <-- collapse extra spaces
+    text := RegExReplace(text, "[\t ]+$", "")
+    return Trim(text)
+}
+
+StripGridActionText(text) {
+    text := Trim(text)
+    text := RegExReplace(text, "i)\bMove\s+To\s+Recycle\s+Bin\b", "")
+    text := RegExReplace(text, "i)\bRecycle\s+Bin\b", "")
+    text := RegExReplace(text, "\s{2,}", " ")
+    return Trim(text, " `t-")
+}
+
+RunQuickLeadCreateAndTag(lead) {
+    global BATCH_AFTER_ALTN, BATCH_AFTER_PHONE, BATCH_AFTER_TAB
+    global BATCH_AFTER_ENTER, BATCH_AFTER_NAME_PICK, batchTabsChatToName
+
+    if !FocusWorkBrowser()
+        return "FAILED - Browser lost focus"
+
+    Sleep 150
+
+    if (lead["PHONE"] = "" || lead["FULL_NAME"] = "")
+        return "FAILED - Missing phone or name"
+
+    Send "!n"
+    Sleep BATCH_AFTER_ALTN
+
+    if !EnsureParticipantInputReady()
+        return "FAILED - Could not focus To field"
+
+    if !PasteValue(lead["PHONE"])
+        return "FAILED - Could not paste phone"
+    Sleep BATCH_AFTER_PHONE
+
+    Send "{Tab}"
+    Sleep BATCH_AFTER_TAB
+    Send "{Tab}"
+    Sleep 1000
+    FocusSlateComposer()
+    Sleep 250
+
+    SendTabs(batchTabsChatToName)
+    Sleep 200
+    Send "{Enter}"
+    Sleep BATCH_AFTER_ENTER
+
+    Send "^a"
+    Sleep 80
+    if !PasteValue(lead["HOLDER_NAME"])
+        return "FAILED - Could not paste holder into name field"
+    Sleep BATCH_AFTER_NAME_PICK
+
+    Send "{Enter}"
+    Sleep BATCH_AFTER_ENTER
+
+    tagStatus := ApplyQuoTag(lead["TAG_VALUE"])
+    if (tagStatus != "OK")
+        return tagStatus
+
+    return "OK"
 }
 
 ; ===================== FORM-FILL WORKFLOWS =====================
@@ -2042,6 +3148,62 @@ FillNewProspectForm(fields) {
 
     FastType(fields["PHONE"])
 }
+
+
+
+FillNationalGeneralForm(fields) {
+FastType(fields["FIRST_NAME"])
+    Sleep 30
+    Send "{Tab}"
+    Sleep 30
+
+    Send "{Tab}"
+    Sleep 30
+
+    FastType(fields["LAST_NAME"])
+    Sleep 30
+    Send "{Tab}"
+    Sleep 30
+	
+    Loop 5{
+    Send "{Tab}"
+    Sleep 30
+    }
+
+    PasteField(fields["DOB"])
+    Sleep 120
+    Send "{Tab}"
+    Sleep 80
+
+    Loop 3 {
+    Send "{Tab}" 
+    Sleep 30
+    }
+
+    FastType(fields["ADDRESS_1"])
+    Sleep 30
+    Send "{Tab}"
+    Sleep 30
+
+    FastType(fields["APT_SUITE"])
+    Sleep 30
+    Send "{Tab}"
+    Sleep 30
+
+    FastType(fields["CITY"])
+    Sleep 30
+    Send "{Tab}"
+    Sleep 50
+
+    SelectDropdownValue(fields["STATE"])
+
+    FastType(fields["ZIP"])
+    Sleep 30
+    Send "{Tab}"
+    Sleep 30
+
+}
+
 
 ; ===================== OPTIONAL DEBUG / TEST UTILITIES =====================
 
