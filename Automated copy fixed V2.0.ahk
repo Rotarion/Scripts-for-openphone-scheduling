@@ -1876,9 +1876,9 @@ fields["PHONE"]     := NormalizePhone(cols[9])
 fields["DOB"]       := NormalizeDOB(cols[10])
 fields["GENDER"]    := NormalizeGender(cols[11])
 
-nameText := ExtractBatchName(cols[1])
-if (nameText != "")
-    ApplyLeadName(fields, nameText)
+    nameText := ExtractBatchName(cols[1])
+    if (nameText != "")
+        ApplyLeadName(fields, nameText)
 
 NormalizeAddressMap(fields)
 return fields
