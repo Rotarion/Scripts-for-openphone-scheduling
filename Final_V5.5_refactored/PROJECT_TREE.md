@@ -1,0 +1,56 @@
+# Project Tree
+
+```text
+Final_V5.5_refactored/
+  main.ahk
+  RESPONSIBILITY_MAP.md
+  MIGRATION_PLAN.md
+  COMPATIBILITY_NOTE.md
+  RISK_LOG.md
+  DEAD_CODE_REPORT.md
+  NEXT_SPRINT_RECOMMENDATIONS.md
+  PROJECT_TREE.md
+  hotkeys/
+    lead_hotkeys.ahk
+    schedule_hotkeys.ahk
+    crm_hotkeys.ahk
+    debug_hotkeys.ahk
+  workflows/
+    single_lead_create.ahk
+    batch_run.ahk
+    message_schedule.ahk
+    prospect_fill.ahk
+    crm_activity.ahk
+  domain/
+    lead_parser.ahk
+    lead_normalizer.ahk
+    pricing_rules.ahk
+    message_templates.ahk
+    date_rules.ahk
+    batch_rules.ahk
+  adapters/
+    clipboard_adapter.ahk
+    browser_focus_adapter.ahk
+    devtools_bridge.ahk
+    quo_adapter.ahk
+    crm_adapter.ahk
+    tag_selector_adapter.ahk
+  config/
+    settings.ini
+    holidays_2026.ini
+    timings.ini
+    templates.ini
+  logs/
+    batch_lead_log.csv
+    run_state.json
+  assets/
+    js/
+      participant_input_focus.js
+      tag_selector.js
+  tests/
+    parser_fixtures.ahk
+    pricing_tests.ahk
+    date_tests.ahk
+    message_tests.ahk
+    workflow_dryrun_tests.ahk
+```

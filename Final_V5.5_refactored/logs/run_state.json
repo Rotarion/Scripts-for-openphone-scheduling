@@ -1,0 +1,10 @@
+{
+  "offset": 38,
+  "batchResumeIndex": 1,
+  "batchResumeMode": "",
+  "batchResumeRawLength": 0,
+  "running": false,
+  "stopFlag": false,
+  "lastAction": "migration-bootstrap",
+  "updatedAt": "2026-04-22 00:00:00"
+}

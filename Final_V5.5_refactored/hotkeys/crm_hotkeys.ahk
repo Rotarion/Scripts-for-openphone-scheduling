@@ -1,0 +1,6 @@
+^!0::RunNationalGeneralProspectFillFromClipboard()
+^!9::RunNewProspectFillFromClipboard()
+^!t::RunPasteLastConfiguredDatePreset()
+^!y::RunPasteTomorrowPhonePreset()
+^!k::RunCrmAttemptedContactWorkflow()
+^!j::RunCrmQuoteCallWorkflow()
