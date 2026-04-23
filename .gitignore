@@ -1,0 +1,13 @@
+# Runtime state — regenerated on each run
+logs/run_state.json
+
+# AutoHotkey compiled executables
+*.exe
+
+# Windows shortcuts
+*.lnk
+
+# Editor/OS clutter
+.DS_Store
+Thumbs.db
+desktop.ini
