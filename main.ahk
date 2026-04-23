@@ -14,7 +14,6 @@ global batchLogFile := logsRoot "\batch_lead_log.csv"
 global runStateFile := logsRoot "\run_state.json"
 global tagSelectorJsFile := assetsRoot "\js\tag_selector.js"
 global participantInputJsFile := assetsRoot "\js\participant_input_focus.js"
-global legacyMonolithFile := projectRoot "\..\Final_V5.5.ahk"
 
 global holidays := []
 global batchLeadHolder := []
